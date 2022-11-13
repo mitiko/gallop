@@ -1,3 +1,11 @@
+# zig compile outputs
 zig-cache/
 zig-out/
 
+# comrpessed and decompresed files (testing)
+*.bin
+*.orig
+
+# executables and object files
+gallop
+gallop.o
