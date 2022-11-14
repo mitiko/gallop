@@ -14,7 +14,7 @@ const Model = struct {
 
     const Self = @This();
 
-    pub fn init() Self { return Self { .ctx = 0, .data = .{Counter.init()}**(1<<12) }; }
+    pub fn init() Self { return Self { .ctx = 0, .data = .{Counter.init()} ** (1 << 12) }; }
     pub fn p(self: *Self) u16 { return self.data[self.ctx].p(); }
     pub fn update(self: *Self, bit: u1) void {
         self.data[self.ctx].update(bit);
@@ -79,22 +79,22 @@ fn ArithmeticCoder(comptime T: type, comptime mode: Mode) type { return struct {
     pub fn flush(self: *Self) !void { // flush leading byte to stream
         comptime { assert(mode == .c); }
         try self.writeBit(self.x2 >> PREC_SHIFT);
-        while (!self.io.bitQueue.isEmpty()) {
-            self.x2 <<= 1; try self.writeBit(self.x2 >> PREC_SHIFT);
+        while (!self.io.bitQueue.isEmpty()) : (self.x2 <<= 1) {
+            try self.writeBit(self.x2 >> PREC_SHIFT);
         }
     }
 
     fn incParity(self: *Self) void { self.revBits += 1; } // for E3 mapping
     fn writeBit(self: *Self, bit: u32) !void { // writes bit, conscious of any E3 mappings
         try self.io.writeBit(@intCast(u1, bit));
-        while (self.revBits > 0) {
+        while (self.revBits > 0) : (self.revBits -= 1) {
             try self.io.writeBit(@intCast(u1, bit ^ 1));
-            self.revBits -= 1;
         }
     }
 
     // processes a single bit -> decompresses a bit in decode mode, compresses a bit in encode mode
-    fn proc(self: *Self, bit_: if (mode == .d) void else u1, prob: u16) anyerror!(if (mode == .d) u1 else void) {
+    const returnType: type = anyerror!(if (mode == .d) u1 else void);
+    fn proc(self: *Self, bit_: if (mode == .d) void else u1, prob: u16) returnType {
         const p = if (prob == 0) 1 else @as(u64, prob) << 16;
         const xmid = @intCast(u32, self.x1 + ((@as(u64, self.x2 - self.x1) * p) >> 32));
 
@@ -155,8 +155,8 @@ const BitBufReader = struct {
 
     pub fn read_u32(self: *Self) !u32 {
         assert(self.bitQueue.isEmpty());
-        var res: u32 = 0; var i: u3 = 0;
-        while (i < 4) : (i += 1) {
+        var res: u32 = 0; comptime var i = 0;
+        inline while (i < 4) : (i += 1) {
             res = (res << 8) | try self.readByte();
         }
         return res;
@@ -164,8 +164,8 @@ const BitBufReader = struct {
 
     pub fn read_u64(self: *Self) !u64 {
         assert(self.bitQueue.isEmpty());
-        var res: u64 = 0; var i: u4 = 0;
-        while (i < 8) : (i += 1) {
+        var res: u64 = 0; comptime var i = 0;
+        inline while (i < 8) : (i += 1) {
             res = (res << 8) | try self.readByte();
         }
         return res;
@@ -198,8 +198,8 @@ const BitBufWriter = struct {
         assert(self.bitQueue.isEmpty());
         assert(self.idx == 0);
 
-        var i: u4 = 0; var val = valc;
-        while (i < 8) : (i += 1) {
+        var val = valc; comptime var i = 0;
+        inline while (i < 8) : (i += 1) {
             self.buf[self.idx] = @intCast(u8, val >> 56);
             self.idx += 1;
             val <<= 8;
@@ -325,7 +325,7 @@ fn reportResult(mode: Mode, inSize: u64, outSize: u64, ns: f64) void {
     const us = ns / 1000; if (us < 1000) { print("{d:.3} us\n", .{us}); return; }
     const ms = us / 1000; if (ms < 1000) { print("{d:.2} ms\n", .{ms}); return; }
     const s  = ms / 1000; if (s  < 300)  { print("{d:.2} sec\n", .{s}); return; }
-    const m = s / 60; if (m < 60) { print("{d:.2} mins\n", .{m}); return; }
+    const m  = s / 60;    if (m  < 60)   { print("{d:.2} mins\n",.{m}); return; }
     const h = m / 60; print("{d:.2} hr\n", .{h});
 }
 
