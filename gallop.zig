@@ -15,7 +15,7 @@ const Model = struct {
     const Self = @This();
 
     pub fn init() Self { return Self { .ctx = 0, .data = .{Counter.init()}**(1<<12) }; }
-    pub fn p(self: Self) u16 { return self.data[self.ctx].p(); }
+    pub fn p(self: *Self) u16 { return self.data[self.ctx].p(); }
     pub fn update(self: *Self, bit: u1) void {
         self.data[self.ctx].update(bit);
         self.ctx <<= 1; self.ctx |= bit;
