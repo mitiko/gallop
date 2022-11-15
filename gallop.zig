@@ -55,6 +55,7 @@ const Counter = struct {
 /// Currently the statemap is static - aka each state resolves to the same
 /// static probability for the entirety of the stream. Thus compression results
 /// are the same if just using the 10-bit auxiliary table.. like bit-for-bit same.
+/// [stateGen adapted from weath3rb0i]
 
 // Container level expression are implicitly comptime
 const stateTable = stateGen();
@@ -80,7 +81,6 @@ const StateEntry = struct {
         return Self { .next = [_]u12 { s1, s2 }, .p = p };
     }
 };
-
 
 fn stateGen() [ST_SIZE]StateEntry {
     var t: [ST_SIZE]StateEntry = undefined;
@@ -136,21 +136,15 @@ fn auxTableGen() [ST_SUBTABLE_SIZE]StateEntry {
     return at;
 }
 
-fn calcProb(count: u16, total: u16) u16 {
-    const c1 = @as(u64, count);
-    const t = @as(u64, total);
-    const p = (1 << 16) * (c1 + 1) / (t + 2);
-    return @intCast(u16, p);
-}
-
+fn ceilDiv2(x: usize) usize { return ((x + 2) / 2) - 1; }
 fn genNextAuxNodes(level: usize, filled: usize, node: usize) [2]u12 {
     if (level != ST_TREE_DEPTH) {
         const nextNode = @intCast(u12, filled + level + node);
         return [_]u12 { nextNode, nextNode+1 };
     }
 
-    const skipToLevel = ((level + 2) / 2) - 1; // ceil(level / 2) = 22
-    const nextNodeIdx = ((node + 2) / 2) - 1; // ceil(node / 2)
+    const skipToLevel = ceilDiv2(level);
+    const nextNodeIdx = ceilDiv2(node);
     assert(nextNodeIdx < skipToLevel);
 
     const currNode = @intCast(u12, filled + node);
@@ -161,6 +155,13 @@ fn genNextAuxNodes(level: usize, filled: usize, node: usize) [2]u12 {
     else                        [_]u12 { nextNode, nextNode };
 }
 
+fn calcProb(count: u16, total: u16) u16 {
+    const c1 = @as(u64, count);
+    const t = @as(u64, total);
+    const p = (1 << 17) * (c1 + 1) / (t + 2);
+    const round_bit = p & 1; // round (instead of truncating)
+    return @intCast(u16, (p >> 1) + round_bit);
+}
 
 /// ============================= Arithmetic coder =============================
 /// 32-bit (binary) arithmetic coder
