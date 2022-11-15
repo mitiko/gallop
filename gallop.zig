@@ -23,27 +23,144 @@ const Model = struct {
 };
 
 /// ============================= Counter =============================
-/// A simple u12 counter (takes 3-bytes of memory)
-/// To be replaced with a state table + state map
+/// Uses the statetable as a backing structure -> 12-bit state
 const Counter = struct {
-    counts: [2]u12,
+    entry: u12,
+    const Self = @This();
+    pub fn init() Self { return Self { .entry = 0 }; }
+    pub fn p(self: *Self) u16 { return stateTable[self.entry].p; }
+    pub fn update(self: *Self, bit: u1) void { self.entry = stateTable[self.entry].next[bit]; }
+};
+
+/// ============================= Statetable =============================
+/// A 12-bit statetable with 2-bits of exact level-1 history, and a 10-bit
+/// tree (keeps unordered approximate 0/1 counts)
+/// First, an entry tree branches paths into 4 subtables - A, B, C, D
+/// States in each subtable keep 2 exact bits of level-1 history
+/// A = 00, B = 01, C = 10, D = 11
+/// These subtables are connected such as to keep these bits:
+/// A,C -> (0: A, 1: C), B,D -> (0: C, 1: D)
+/// Note A and D are self-referential
+/// Next we create an auxiliary table that models each subtable:
+/// m - n - q
+/// |   |
+/// p - r
+/// |
+/// s
+/// Counts as (count 1s, count 0s):
+/// m (0, 0), n (1, 0), p (0, 1), q(2, 0), r(1, 1), s(0, 2)
+/// Each level at depth i has i nodes
+/// The leaf nodes connect back to level/2, essentially halving the counts
+/// This is similiar to the counter in v0.1.0
+/// Currently the statemap is static - aka each state resolves to the same
+/// static probability for the entirety of the stream. Thus compression results
+/// are the same if just using the 10-bit auxiliary table.. like bit-for-bit same.
+
+// Container level expression are implicitly comptime
+const stateTable = stateGen();
+
+// Total nodes are 3 + 4 * [x*(x+1)/2] where x is level
+// Limiting this to be under 2^12 (for 12-bit state)
+// 3 + 2 * [x^2 + x] < 4096 <=> x^2 + x - 2046.5 < 0 <=> x < 44.7410
+// We could add subtables for 000 and 111 -> 7 + 6 * [x*(x+1)/2]
+// 7 + 3 * [x^2 + x] < 4096 <=> x^2 + x - 1363 < 0 <=> x < 36.4222
+const ST_TREE_DEPTH = 44;
+const ST_SUBTABLE_SIZE = ST_TREE_DEPTH * (ST_TREE_DEPTH + 1) / 2; // 990
+const ST_SIZE = 3 + 4 * ST_SUBTABLE_SIZE;
+const HALF = 1 << 15; // = 1/2 for 16-bit probabilities
+const ST_OFFSET: u12 = ST_SUBTABLE_SIZE; // subtables' nodes are offset by the subtable size
+
+// TODO: Use a statemap instead of keeping probabilities tied to the state entry
+const StateEntry = struct {
+    next: [2]u12, p: u16,
 
     const Self = @This();
-    pub fn init() Self { return Self { .counts = [_]u12 { 0, 0 } }; }
-    pub fn p(self: *Self) u16 {
-        const n0 = @as(u64, self.counts[0]);
-        const n1 = @as(u64, self.counts[1]);
-        return @intCast(u16, (1 << 16) * (n1 + 1) / (n1 + n0 + 2));
-    }
-    pub fn update(self: *Self, bit: u1) void {
-        const maxCount = (1 << 12) - 1;
-        if (self.counts[0] == maxCount or self.counts[1] == maxCount) {
-            self.counts[0] >>= 1;
-            self.counts[1] >>= 1;
-        }
-        self.counts[bit] += 1;
+    pub fn init() Self { return Self.new(0, 0, 0); }
+    pub fn new(s1: u12, s2: u12, p: u16) Self {
+        return Self { .next = [_]u12 { s1, s2 }, .p = p };
     }
 };
+
+
+fn stateGen() [ST_SIZE]StateEntry {
+    var t: [ST_SIZE]StateEntry = undefined;
+    const a = 3;                 // a = 00
+    const b = a + ST_OFFSET;     // b = 01
+    const c = a + 2 * ST_OFFSET; // c = 10
+    const d = a + 3 * ST_OFFSET; // d = 11
+
+    // entry nodes
+    t[0] = StateEntry.new(1, 2, HALF);
+    t[1] = StateEntry.new(a, b, HALF);
+    t[2] = StateEntry.new(c, d, HALF);
+
+    // auxiliary table
+    const at = auxTableGen();
+
+    // connect subtables using auxiliary table
+    comptime var i = 0;
+    inline while (i < ST_SUBTABLE_SIZE) : (i += 1) {
+        const next0 = at[i].next[0];
+        const next1 = at[i].next[1];
+        const p = at[i].p;
+
+        const l0 = StateEntry.new(a + next0, b + next1, p);
+        const l1 = StateEntry.new(c + next0, d + next1, p);
+        t[a + i] = l0;
+        t[b + i] = l1;
+        t[c + i] = l0;
+        t[d + i] = l1;
+    }
+
+    return t;
+}
+
+fn auxTableGen() [ST_SUBTABLE_SIZE]StateEntry {
+    @setEvalBranchQuota(1 << 16);
+    var at: [ST_SUBTABLE_SIZE]StateEntry = undefined;
+
+    comptime var level = 1;
+    comptime var filled = 0;
+    inline while (level <= ST_TREE_DEPTH) : (level += 1) {
+        comptime var node = 0;
+        inline while (node < level) : (node += 1) {
+            const p = calcProb(node, level-1); // (count, total) = (node, level-1)
+            const next = genNextAuxNodes(level, filled, node);
+            assert(next[0] < ST_OFFSET and next[1] < ST_OFFSET);
+
+            at[filled + node] = StateEntry.new(next[0], next[1], p);
+        }
+        filled += level;
+    }
+
+    return at;
+}
+
+fn calcProb(count: u16, total: u16) u16 {
+    const c1 = @as(u64, count);
+    const t = @as(u64, total);
+    const p = (1 << 16) * (c1 + 1) / (t + 2);
+    return @intCast(u16, p);
+}
+
+fn genNextAuxNodes(level: usize, filled: usize, node: usize) [2]u12 {
+    if (level != ST_TREE_DEPTH) {
+        const nextNode = @intCast(u12, filled + level + node);
+        return [_]u12 { nextNode, nextNode+1 };
+    }
+
+    const skipToLevel = ((level + 2) / 2) - 1; // ceil(level / 2) = 22
+    const nextNodeIdx = ((node + 2) / 2) - 1; // ceil(node / 2)
+    assert(nextNodeIdx < skipToLevel);
+
+    const currNode = @intCast(u12, filled + node);
+    const nextNode = @intCast(u12, nextNodeIdx + (skipToLevel - 1) * skipToLevel / 2);
+
+    return if (node == 0)       [_]u12 { currNode, nextNode }
+    else   if (node == level-1) [_]u12 { nextNode, currNode }
+    else                        [_]u12 { nextNode, nextNode };
+}
+
 
 /// ============================= Arithmetic coder =============================
 /// 32-bit (binary) arithmetic coder
@@ -78,7 +195,7 @@ fn ArithmeticCoder(comptime T: type, comptime mode: Mode) type { return struct {
     pub fn decode(self: *Self, p: u16) !u1 { return self.proc({}, p); }
     pub fn flush(self: *Self) !void { // flush leading byte to stream
         comptime { assert(mode == .c); }
-        try self.writeBit(self.x2 >> PREC_SHIFT);
+        try self.writeBit(self.x2 >> PREC_SHIFT); self.x2 <<= 1;
         while (!self.io.bitQueue.isEmpty()) : (self.x2 <<= 1) {
             try self.writeBit(self.x2 >> PREC_SHIFT);
         }
@@ -265,26 +382,31 @@ pub fn main() !void {
         .c => try getSize(inFile),
         .d => try reader.read_u64()
     };
-    if (mode == .c) try writer.write_u64(size);
-
-    var ac = switch(mode) {
-        .c => try initAC(&writer, Mode.c),
-        .d => try initAC(&reader, Mode.d)
-    };
-
     var i: u64 = 0;
-    while (i < size) : (i += 1) {
-        comptime var k = 0;
-        inline while (k < 8) : (k += 1) {
-            const bit = switch(mode) {
-                .c => try reader.readBit(),
-                .d => try ac.decode(model.p())
-            };
-            switch(mode) {
-                .c => try ac.encode(bit, model.p()),
-                .d => try writer.writeBit(bit)
+
+    if (mode == .c) {
+        try writer.write_u64(size);
+        var ac = try initAC(&writer, Mode.c);
+
+        while (i < size) : (i += 1) {
+            comptime var k = 0;
+            inline while (k < 8) : (k += 1) {
+                const bit = try reader.readBit();
+                try ac.encode(bit, model.p());
+                model.update(bit);
             }
-            model.update(bit);
+        }
+        try ac.flush();
+    } else {
+        var ac = try initAC(&reader, Mode.d);
+
+        while (i < size) : (i += 1) {
+            comptime var k = 0;
+            inline while (k < 8) : (k += 1) {
+                const bit = try ac.decode(model.p());
+                try writer.writeBit(bit);
+                model.update(bit);
+            }
         }
     }
     try writer.flush();
@@ -299,6 +421,7 @@ fn parseMode(arg: ?[:0]const u8) Mode {
     if (arg == null) exit(1);
     const mode = if (std.mem.eql(u8, arg.?, "c")) Mode.c
             else if (std.mem.eql(u8, arg.?, "d")) Mode.d
+            else if (std.mem.eql(u8, arg.?, "s")) printStateTable()
             else null;
     if (mode == null) exit(2);
     return mode.?;
@@ -329,13 +452,27 @@ fn reportResult(mode: Mode, inSize: u64, outSize: u64, ns: f64) void {
     const h = m / 60; print("{d:.2} hr\n", .{h});
 }
 
+fn printStateTable() Mode {
+    var writer = std.io.getStdOut().writer();
+    var i: u64 = 0;
+    while (i < stateTable.len) : (i += 1) {
+        const st = stateTable[i];
+        writer.print("{},{},{}\n", .{st.next[0], st.next[1], st.p}) catch {};
+    }
+    std.os.exit(0);
+}
+
 fn exit(status: u8) void {
     print(
         \\gallop file compressor (C) 2022, Dimitar Rusev (mitiko)
         \\
         \\To compress:   ./gallop c input output
         \\To decompress: ./gallop d input output
-        \\Example: (./gallop c /data/book1 book1.bin) && (./gallop d book1.bin book1.orig) && (cmp book1.orig /data/book1)
+        \\Print statetable to stdout: ./gallop s
+        \\Examples:
+        \\(./gallop c /data/book1 book1.bin) && (./gallop d book1.bin book1.orig) && (cmp book1.orig /data/book1)
+        \\(./gallop c /data/enwik8 enwik8.bin) && (./gallop d enwik8.bin enwik8.orig) && (cmp enwik8.orig /data/enwik8)
+        \\ ./gallop s > gstates.txt
         \\
     ,.{});
     std.os.exit(status);
