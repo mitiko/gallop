@@ -9,3 +9,6 @@ zig-out/
 # executables and object files
 gallop
 gallop.o
+
+# local todo list
+TODO.md
