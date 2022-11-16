@@ -65,7 +65,7 @@ const stateTable = stateGen();
 // 3 + 2 * [x^2 + x] < 4096 <=> x^2 + x - 2046.5 < 0 <=> x < 44.7410
 // We could add subtables for 000 and 111 -> 7 + 6 * [x*(x+1)/2]
 // 7 + 3 * [x^2 + x] < 4096 <=> x^2 + x - 1363 < 0 <=> x < 36.4222
-const ST_TREE_DEPTH = 44;
+const ST_TREE_DEPTH = 44; // TODO: 43 doesn't work
 const ST_SUBTABLE_SIZE = ST_TREE_DEPTH * (ST_TREE_DEPTH + 1) / 2; // 990
 const ST_SIZE = 3 + 4 * ST_SUBTABLE_SIZE;
 const HALF = 1 << 15; // = 1/2 for 16-bit probabilities
